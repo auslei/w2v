@@ -4,151 +4,382 @@ import nltk
 from nltk.tokenize import word_tokenize
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 
-#nltk.download("gutenberg")
-#nltk.download('punkt')
+#%% Download Books and Packages (only if requireD)
+# https://www.gutenberg.org - Free Ebook Collection
 
+nltk.download("gutenberg")
+nltk.download('punkt')
+nltk.download('stopwords')
+
+#%%
 from nltk.corpus import gutenberg
-print(gutenberg.fileids)
-# %%
-# Sample Data
+print(gutenberg.fileids())
+
+
+# Load data Emma by Jane Austen into corpus
 corpus = gutenberg.raw('austen-emma.txt')
 
-# Preprocessing
-vocab = set(word_tokenize(corpus))
+#%% Generate vocab
 
-word_to_ix = {word: i for i, word in enumerate(vocab)}
-word_to_ix['<PAD>'] = len(word_to_ix)  # Add a token for padding
+from collections import Counter
+from nltk.corpus import stopwords
+import string
+
+stopwords = set(stopwords.words("english"))
+important_words = {"i", "he", "she", "we", "they", "you"}  # Keep these
+filtered_stopwords = stopwords - important_words  # Remove only unwanted wordsåç
+
+tokens = word_tokenize(corpus)
+tokens = [word for word in tokens if word not in string.punctuation]
+tokens = [word.lower() for word in tokens if word not in filtered_stopwords]
+
+c = Counter(tokens)
+
+print(c.most_common(10))
+
+#%% Building Vocab  
+vocab = set(tokens) # setting a unique list of words
+
+word_to_ix = {'<PAD>': 0, '<OOV>': 1}  # Reserve first two indices for special tokens
+word_to_ix.update({word: i+2 for i, word in enumerate(vocab)})  # Shift words by 2
+
 ix_to_word = {i: word for word, i in word_to_ix.items()}
 
-# Key variables
-vocab_size = len(vocab)
+print(ix_to_word)
+
+#%% Key variable
+vocab_size = len(ix_to_word)
 embedding_dim = 10
-window_size = 2
-# %%
-# Generate CBOW Training Data
+window_size = 5 # window_size is the size to cater for each side of the target.
+å
+print(vocab_size, embedding_dim, window_size)
+# %% Generate CBOW Training Data
 data = []
-words = word_tokenize(corpus)
-for idx in range(len(words)):
+
+for idx in range(len(tokens)):
+    # capture context words (words around the current idx)
     context = [
-        words[i] for i in range(max(0, idx - window_size), min(len(words), idx + window_size + 1))
+        word_to_ix.get(tokens[i], word_to_ix["<OOV>"])  # Handle OOV words
+        for i in range(max(0, idx - window_size), min(len(tokens), idx + window_size + 1))
         if i != idx
     ]
-    target = words[idx]
+    target = word_to_ix.get(tokens[idx])
+    
+    # padding
+    while len(context) < 2 * window_size:
+        context.append(word_to_ix["<PAD>"])
+
     data.append((context, target))
-# %%
-# One-hot encoding for words
-# def one_hot_vector(word, vocab_size):
-#     vec = np.zeros(vocab_size)
-#     vec[word_to_ix[word]] = 1
-#     return vec
 
-
-# # Initialize Weights
-# W1 = np.random.rand(vocab_size, embedding_dim)  # Input to Hidden
-# W2 = np.random.rand(embedding_dim, vocab_size)  # Hidden to Output
-
-# # Training Parameters
-# learning_rate = 0.01
-# epochs = 1000
-
-# # Training Loop
-# for epoch in range(epochs):
-#     loss = 0
-#     for context, target in data:
-#         # Average context word embeddings
-#         context_vectors = np.array([one_hot_vector(word, vocab_size) for word in context]) # [n_context_word x vocab_size]
-#         context_mean = np.mean(context_vectors, axis=0) # [vocab_size]
-
-#         hidden = np.dot(context_mean, W1) # [embedding_dimension]
-#         output = np.dot(hidden, W2) # [vocab_size]
-
-#         predicted = np.exp(output) / np.sum(np.exp(output))  # Softmax 
-
-#         # Calculate loss
-#         target_vector = one_hot_vector(target, vocab_size)
-#         loss += -np.sum(target_vector * np.log(predicted))
-
-#         # Backpropagation
-#         error = predicted - target_vector
-#         dW2 = np.outer(hidden, error)
-#         dW1 = np.outer(context_mean, np.dot(W2, error))
-
-#         W2 -= learning_rate * dW2
-#         W1 -= learning_rate * dW1
-
-#     if epoch % 100 == 0:
-#         print(f"Epoch {epoch}, Loss: {loss:.4f}")
-
-# # Display Word Embeddings
-# print("\nWord Embeddings (CBOW):")
-# for word, idx in word_to_ix.items():
-#     print(f"{word}: {W1[idx]}")
-
-# %%
+# %% Train CBOW
 import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Embedding, Dense, Input, Lambda
+from tensorflow.keras.optimizers import Adam
+
+# Convert to NumPy arrays for TensorFlow
+X_train = np.array([context for context, _ in data]) # batch_size x 2 * Window_size
+y_train = np.array([target for _, target in data])
+
+# Convert labels to one-hot encoding
+y_train = tf.keras.utils.to_categorical(y_train, num_classes=vocab_size)
+
+# CBOW Model Definition (Using Keras Functional API)
+input_layer = Input(shape=(2 * window_size,))  # Shape: (batch_size, 4)
+embedding_layer = Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=2 * window_size)(input_layer)
+mean_embedding = Lambda(lambda x: tf.reduce_mean(x, axis=1))(embedding_layer)  # Averaging context embeddings
+output_layer = Dense(vocab_size, activation="softmax")(mean_embedding)  # Predicts the target word
+
+model = Model(inputs=input_layer, outputs=output_layer)
+model.compile(loss="categorical_crossentropy", optimizer=Adam(learning_rate=0.01), metrics=["accuracy"])
+
+# Model Summary
+model.summary()
+
+#%% Model Training
+epochs = 20
+model.fit(X_train, y_train, batch_size=128, epochs=epochs, verbose=1)
+
+# Extract Embeddings
+word_vectors = model.layers[1].get_weights()[0]  # Extract learned embeddings
+
+
+#%%
+# 🔹 Convert Word Indices to One-Hot Encoding for Context Words
+def to_one_hot(indices, vocab_size):
+    batch_size, context_size = indices.shape
+    one_hot = np.zeros((batch_size, context_size, vocab_size))
+    for i in range(batch_size):
+        for j in range(context_size):
+            one_hot[i, j, indices[i, j]] = 1
+    return one_hot
+
+
+X_train_one_hot = to_one_hot(X_train, vocab_size)
+
+# 🔹 Define CBOW Model Using Dense Instead of Embedding Layer
+input_layer = Input(shape=(2 * window_size, vocab_size))  # One-hot input
+
+# Dense layer simulating embedding lookup (weights = vocab_size x embedding_dim)
+dense_embedding = Dense(embedding_dim, use_bias=False)(input_layer)  # (batch_size, context_size, embedding_dim)
+
+# Mean Pooling (Averaging word vectors)
+mean_embedding = Lambda(lambda x: tf.reduce_mean(x, axis=1))(dense_embedding)
+
+# Output Layer (Softmax over Vocabulary)
+output_layer = Dense(vocab_size, activation="softmax")(mean_embedding)
+
+# Define Model
+model = Model(inputs=input_layer, outputs=output_layer)
+model.compile(loss="categorical_crossentropy", optimizer=Adam(learning_rate=0.01), metrics=["accuracy"])
+
+# Model Summary
+model.summary()
+
+# Train the Model
+epochs = 10
+model.fit(X_train_one_hot, y_train, batch_size=128, epochs=epochs, verbose=1)
+
+# Extract Embeddings (Weights of First Dense Layer)
+word_vectors = model.layers[1].get_weights()[0]  # Extract embedding weights
+
+# Print sample word embeddings
+sample_words = ["emma", "love", "friend"]
+for word in sample_words:
+    if word in word_to_ix:
+        print(f"Embedding for '{word}': {word_vectors[word_to_ix[word]]}")
+# %% Visualise
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+
+# 🔹 Extract Embedding Weights from First Dense Layer (Simulated Embedding Layer)
+word_vectors = model.layers[1].get_weights()[0]  # Shape: (vocab_size, embedding_dim)
+
+# 🔹 Reduce Dimensions Using t-SNE
+tsne = TSNE(n_components=2, random_state=42)
+word_vectors_2d = tsne.fit_transform(word_vectors)
+
+# 🔹 Select a Sample of Words to Plot
+num_words = 100  # Limit the number of words to avoid clutter
+sample_words = list(word_to_ix.keys())[:num_words]  # Pick the first N words
+sample_words = ["king", "queen", "woman", "man", "emma", "harry", "cat", "dog", "fish"]
+sample_indices = [word_to_ix[word] for word in sample_words]
+
+# 🔹 Get Their Corresponding 2D Points
+word_vectors_2d_sample = word_vectors_2d[sample_indices]
+
+# 🔹 Plot Word Embeddings
+plt.figure(figsize=(12, 8))
+plt.scatter(word_vectors_2d_sample[:, 0], word_vectors_2d_sample[:, 1], marker='o', color='blue')
+
+# 🔹 Annotate Words
+for i, word in enumerate(sample_words):
+    plt.annotate(word, xy=(word_vectors_2d_sample[i, 0], word_vectors_2d_sample[i, 1]), fontsize=12)
+
+plt.title("Word Embeddings Visualized Using t-SNE")
+plt.xlabel("Dimension 1")
+plt.ylabel("Dimension 2")
+plt.grid(True)
+plt.show()
+# %%
+word_vectors_2d_sample
+# %%
+# =============================================
+# 📌 CBOW Word Embeddings Training in TensorFlow
+# =============================================
+
+# ✅ 1. Import Required Libraries
 import numpy as np
-X = []
-y = []
+import tensorflow as tf
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.corpus import gutenberg, stopwords
+from collections import Counter
+import string
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+from tensorflow.keras.layers import Input, Dense, Lambda
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
 
-max_context_length = window_size * 2
-for context, target in data:
-    context_idx = [word_to_ix[word] for word in context]
-    padded_context = pad_sequences([context_idx], maxlen=max_context_length, padding='post', value=word_to_ix['<PAD>'])
+# =============================================
+# ✅ 2. Download Required NLTK Datasets
+# =============================================
+nltk.download("gutenberg")
+nltk.download("punkt")
+nltk.download("stopwords")
+
+#%%
+# =============================================
+# ✅ 3. Load & Preprocess Text Data 
+# =============================================
+def load_gutenberg_text():
+    """Loads all books from the NLTK Gutenberg dataset and concatenates them into a single text corpus."""
+    corpus = ""
+    for file_id in gutenberg.fileids():
+        corpus += gutenberg.raw(file_id) + "\n\n"  # Add spacing between books
+    return corpus
+
+
+def preprocess_text(corpus):
+    """Tokenizes text, removes punctuation and stopwords, and converts to lowercase."""
+    stop_words = set(stopwords.words("english"))
+    important_words = {"i", "he", "she", "we", "they", "you"}  # Keep personal pronouns
+    filtered_stopwords = stop_words - important_words  # Remove other stopwords
+
+    tokens = word_tokenize(corpus)  # Tokenize text
+    tokens = [word.lower() for word in tokens if word.isalnum() and word not in filtered_stopwords]  # Clean tokens
+    return tokens
+
+# Load and preprocess text
+corpus = load_gutenberg_text()
+tokens = preprocess_text(corpus)
+
+# Print the 10 most common words
+word_counts = Counter(tokens)
+print("Most common words:", word_counts.most_common(10))
+
+#%%
+# =============================================
+# ✅ 4. Build Vocabulary & Word Index Mappings
+# =============================================
+def build_vocab(tokens):
+    """Creates word-to-index and index-to-word mappings."""
+    vocab = set(tokens)  # Get unique words
+    word_to_ix = {'<PAD>': 0, '<OOV>': 1}  # Special tokens for padding and unknown words
+    word_to_ix.update({word: i+2 for i, word in enumerate(vocab)})  # Assign index to each word
+    ix_to_word = {i: word for word, i in word_to_ix.items()}  # Reverse mapping
+    return word_to_ix, ix_to_word
+
+word_to_ix, ix_to_word = build_vocab(tokens)
+vocab_size = len(word_to_ix)  # Total words in vocabulary
+
+# Print vocabulary size
+print(f"Vocabulary Size: {vocab_size}")
+
+#%%
+# =============================================
+# ✅ 5. Generate Training Data for CBOW
+# =============================================
+def generate_cbow_data(tokens, word_to_ix, window_size=5):
+    """Generates (context, target) pairs for CBOW training."""
+    data = []
+    for idx in range(len(tokens)):
+        context = [
+            word_to_ix.get(tokens[i], word_to_ix["<OOV>"])
+            for i in range(max(0, idx - window_size), min(len(tokens), idx + window_size + 1))
+            if i != idx
+        ]
+
+        target = word_to_ix.get(tokens[idx], word_to_ix["<OOV>"])  # Target word
+
+        # Ensure fixed-size context (pad if necessary)
+        while len(context) < 2 * window_size:
+            context.append(word_to_ix["<PAD>"])
+
+        data.append((context, target))
     
-    X.append(padded_context)
-    y.append(word_to_ix[target])
+    return data
 
-X = np.array(X)
-y = np.array(y)
+# Define parameters
+window_size = 5
+embedding_dim = 10
 
+# Generate CBOW training data
+data = generate_cbow_data(tokens, word_to_ix, window_size)
 
-# 🧠 CBOW Model Without Embedding Layer
-class CBOWModel(tf.keras.Model):
-    def __init__(self, vocab_size, embedding_dim):
-        super(CBOWModel, self).__init__()
-        self.W1 = tf.Variable(tf.random.normal([vocab_size, embedding_dim]), trainable=True)
-        self.W2 = tf.Variable(tf.random.normal([embedding_dim, vocab_size]), trainable=True)
+#%%
+# =============================================
+# ✅ 6. Convert Training Data to NumPy Arrays
+# =============================================
+X_train = np.array([context for context, _ in data])  # Context words
+y_train = np.array([target for _, target in data])  # Target word
+
+# Convert labels to one-hot encoding
+y_train = tf.keras.utils.to_categorical(y_train, num_classes=vocab_size)
+
+print("Training data shape:", X_train.shape, y_train.shape)
+
+#%%
+
+# =============================================
+# ✅ 7. Define CBOW Model (Using One-Hot Encoding + Dense)
+# =============================================
+def build_cbow_model(vocab_size, embedding_dim, window_size):
+    """Builds a CBOW model using a Dense layer (simulating embeddings)."""
+    input_layer = Input(shape=(2 * window_size, vocab_size))  # One-hot encoded input
+
+    # Dense layer simulating embedding lookup
+    dense_embedding = Dense(embedding_dim, use_bias=False)(input_layer)  # (batch_size, context_size, embedding_dim)
+
+    # Mean Pooling (Averaging word vectors)
+    mean_embedding = Lambda(lambda x: tf.reduce_mean(x, axis=1))(dense_embedding)
+
+    # Output Layer (Softmax over Vocabulary)
+    output_layer = Dense(vocab_size, activation="softmax")(mean_embedding)
+
+    # Compile Model
+    model = Model(inputs=input_layer, outputs=output_layer)
+    model.compile(loss="categorical_crossentropy", optimizer=Adam(learning_rate=0.01), metrics=["accuracy"])
     
-    def call(self, inputs):
-        # One-hot encode context words
-        one_hot = tf.one_hot(inputs, depth=vocab_size)
-        
-        # Compute hidden layer (Average Embedding)
-        hidden = tf.reduce_mean(tf.matmul(one_hot, self.W1), axis=1)
-        
-        # Compute output layer
-        logits = tf.matmul(hidden, self.W2)
-        output = tf.nn.softmax(logits, axis=1)
-        return logits, output
+    return model
 
-# ✅ Training with Explicit GPU Usage
-with tf.device('/GPU:0'):  # Explicitly use GPU
-    model = CBOWModel(vocab_size, embedding_dim)
-    optimizer = tf.keras.optimizers.Adam(learning_rate=0.01)
-    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+# One-hot encode input data
+def to_one_hot(indices, vocab_size):
+    """Converts word indices to one-hot encoded representation."""
+    batch_size, context_size = indices.shape
+    one_hot = np.zeros((batch_size, context_size, vocab_size))
+    for i in range(batch_size):
+        for j in range(context_size):
+            one_hot[i, j, indices[i, j]] = 1
+    return one_hot
 
-    EPOCHS = 100
-    for epoch in range(EPOCHS):
-        total_loss = 0.0
-        
-        for i in range(len(X)):
-            context_words = X[i]
-            target_word = y[i]
-            
-            with tf.GradientTape() as tape:
-                logits, predictions = model(tf.expand_dims(context_words, axis=0))
-                loss = loss_fn(tf.expand_dims(target_word, axis=0), logits)
-            
-            gradients = tape.gradient(loss, model.trainable_variables)
-            optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-            total_loss += loss.numpy()
-        
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch}, Loss: {total_loss:.4f}")
+X_train_one_hot = to_one_hot(X_train, vocab_size)
 
+# Build and summarize model
+model = build_cbow_model(vocab_size, embedding_dim, window_size)
+model.summary()
 
-# 🔍 Inspect Word Representations (Embeddings)
-print("\nWord Embeddings (Learned from W1):")
-for word, idx in word_to_idx.items():
-    print(f"{word}: {model.W1.numpy()[idx]}")
+# =============================================
+# ✅ 8. Train CBOW Model
+# =============================================
+epochs = 10
+model.fit(X_train_one_hot, y_train, batch_size=128, epochs=epochs, verbose=1)
+
+# =============================================
+# ✅ 9. Extract and Visualize Word Embeddings
+# =============================================
+word_vectors = model.layers[1].get_weights()[0]  # Extract learned embeddings
+
+# Function to visualize embeddings using t-SNE
+def visualize_embeddings(word_vectors, word_to_ix, sample_words=None, num_words=100):
+    """Visualizes word embeddings using t-SNE."""
+    tsne = TSNE(n_components=2, random_state=42)
+    word_vectors_2d = tsne.fit_transform(word_vectors)
+
+    # Select words to plot
+    if sample_words:
+        sample_indices = [word_to_ix[word] for word in sample_words if word in word_to_ix]
+    else:
+        sample_words = list(word_to_ix.keys())[:num_words]
+        sample_indices = [word_to_ix[word] for word in sample_words]
+
+    word_vectors_2d_sample = word_vectors_2d[sample_indices]
+
+    # Plot embeddings
+    plt.figure(figsize=(12, 8))
+    plt.scatter(word_vectors_2d_sample[:, 0], word_vectors_2d_sample[:, 1], marker='o', color='blue')
+
+    for i, word in enumerate(sample_words):
+        plt.annotate(word, xy=(word_vectors_2d_sample[i, 0], word_vectors_2d_sample[i, 1]), fontsize=12)
+
+    plt.title("Word Embeddings Visualized Using t-SNE")
+    plt.xlabel("Dimension 1")
+    plt.ylabel("Dimension 2")
+    plt.grid(True)
+    plt.show()
+
+# Sample words for visualization
+sample_words = ["king", "queen", "man", "woman", "emma", "love", "friend", "house", "family"]
+visualize_embeddings(word_vectors, word_to_ix, sample_words)
 # %%
