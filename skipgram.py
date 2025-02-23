@@ -89,116 +89,82 @@ print(f"Vocabulary Size: {vocab_size}")
 
 #%%
 # =============================================
-# ✅ 5. Generate Training Data for CBOW
+# ✅ 5. Generate Training Data for Skip-gram
 # =============================================
+import numpy as np
+import tensorflow as tf
 
-def cbow_data_generator(tokens, word_to_ix, window_size=5):
-    """Generates (context, target) pairs for CBOW training (yields raw indices)."""
+def skipgram_data_generator(tokens, word_to_ix, window_size=5):
+    """Generates (target, context) pairs for Skip-gram training (yields raw indices)."""
     for idx in range(len(tokens)):
-        
-        context = [
-            word_to_ix.get(tokens[i], word_to_ix["<OOV>"])
-            for i in range(max(0, idx - window_size), min(len(tokens), idx + window_size + 1))
-            if i != idx
-        ]  # Context words as word indices
-
         target = word_to_ix.get(tokens[idx], word_to_ix["<OOV>"])  # Target word as index
 
-        # Ensure fixed-size context (pad if necessary)
-        while len(context) < 2 * window_size:
-            context.append(word_to_ix["<PAD>"])
-        
-        vocab_size = len(word_to_ix)  # Ensure vocabulary size is defined
-        target_one_hot = tf.one_hot(tf.cast(target, tf.int32), depth=vocab_size) 
-
-        yield np.array(context, dtype=np.int32), target_one_hot.numpy()  # Yield context and target
+        # Generate context words within the window
+        for i in range(max(0, idx - window_size), min(len(tokens), idx + window_size + 1)):
+            if i != idx:  # Ensure target word is not included in context
+                context = word_to_ix.get(tokens[i], word_to_ix["<OOV>"])  # Context word as index
+                
+                yield np.array(target, dtype=np.int32), np.array(context, dtype=np.int32)  # Yield target-context pair
 
 # Define parameters
 window_size = 5
-embedding_dim = 10
+vocab_size = len(word_to_ix)
 
 # ✅ Keep dataset as word indices, apply one-hot encoding inside the model
 dataset = tf.data.Dataset.from_generator(
-    lambda: cbow_data_generator(tokens, word_to_ix, window_size),
+    lambda: skipgram_data_generator(tokens, word_to_ix, window_size),
     output_signature=(
-        tf.TensorSpec(shape=(2 * window_size,), dtype=tf.int32),  # Context words (indices)
-        tf.TensorSpec(shape=(vocab_size), dtype=tf.int32)  # Target (index)
+        tf.TensorSpec(shape=(), dtype=tf.int32),  # Target word index
+        tf.TensorSpec(shape=(), dtype=tf.int32)   # Context word index
     )
 )
-
 
 #%%
 # =============================================
 # ✅ 6. Build CBOW Model
 # =============================================
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dense, Lambda
+from tensorflow.keras.layers import Input, Dense, Lambda, Embedding
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 
-def build_cbow_model(vocab_size, embedding_dim, window_size):
-    """Builds a CBOW model where one-hot encoding is done inside the model for both input and output."""
+def build_skipgram_model(vocab_size, embedding_dim):
+    """
+    Builds a Skip-gram model where a single word (target) is used to predict its context words.
+    """
 
-    input_layer = Input(shape=(2 * window_size,))  # Input: word indices (NOT one-hot)
+    # 🔹 Input: Word indices (target word)
+    input_layer = Input(shape=(), dtype=tf.int32)  # (batch_size,)
 
-    # Convert word indices to one-hot dynamically (for input)
-    one_hot_input = Lambda(lambda x: tf.one_hot(tf.cast(x, tf.int32), depth=vocab_size))(input_layer)
+    # 🔹 Embedding layer: Converts word index to dense vector representation
+    embedding_layer = Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=1)
+    target_embedding = embedding_layer(input_layer)  # (batch_size, embedding_dim)
 
-    # Dense layer simulating embedding lookup (trainable weight matrix)
-    dense_embedding = Dense(embedding_dim, use_bias=False)(one_hot_input)  # (batch, context_size, embedding_dim)
-
-    # Mean Pooling (Averaging context word vectors)
-    mean_embedding = Lambda(lambda x: tf.reduce_mean(x, axis=1))(dense_embedding)
-
-    # Output Layer (Softmax for predicting target word)
-    output_layer = Dense(vocab_size, activation="softmax")(mean_embedding)
-
-    # Compile Model (Now Uses Standard `categorical_crossentropy`)
-    model = Model(inputs=input_layer, outputs=output_layer)
-    model.compile(loss="categorical_crossentropy", optimizer=Adam(learning_rate=0.01), metrics=["accuracy"])
-
-    return model
-
-
-def build_cbow_model_embedding_layer(vocab_size, embedding_dim, window_size):
-    """Builds a CBOW model using an Embedding layer instead of one-hot encoding."""
-    
-    # 🔹 Input: word indices (no need for one-hot encoding)
-    input_layer = Input(shape=(2 * window_size,), dtype=tf.int32)  # (batch_size, context_size)
-
-    # 🔹 Embedding layer replaces one-hot + dense embedding lookup
-    embedding_layer = Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=2 * window_size)
-    embedded_context = embedding_layer(input_layer)  # (batch_size, context_size, embedding_dim)
-
-    # 🔹 Mean Pooling (Averaging context word vectors)
-    mean_embedding = Lambda(lambda x: tf.reduce_mean(x, axis=1))(embedded_context)  # (batch_size, embedding_dim)
-
-    # 🔹 Output Layer (Softmax for predicting target word)
-    output_layer = Dense(vocab_size, activation="softmax")(mean_embedding)  # (batch_size, vocab_size)
+    # 🔹 Output layer (Softmax over vocabulary): Predict context word
+    output_layer = Dense(vocab_size, activation="softmax")(target_embedding)  # (batch_size, vocab_size)
 
     # ✅ Define Model
     model = Model(inputs=input_layer, outputs=output_layer)
-    model.compile(loss="categorical_crossentropy", optimizer=Adam(learning_rate=0.01), metrics=["accuracy"])
+    model.compile(loss="sparse_categorical_crossentropy", optimizer=Adam(learning_rate=0.01), metrics=["accuracy"])
 
     return model
 
-# ✅ No need to precompute one-hot encoding!
-# Use word indices directly
-model = build_cbow_model(vocab_size, embedding_dim, window_size)
-model.summary()
-#%%
-# =============================================
-# ✅ 8. Train CBOW Model
-# =============================================
+# ✅ Build and summarize the model
+skipgram_model = build_skipgram_model(vocab_size, embedding_dim)
+skipgram_model.summary()
+
+#%% 
+# ============================================= 
+# ✅ 8. Train Skip-gram Model 
+# ============================================= 
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 
-
-# Build CBOW model
-model = build_cbow_model(vocab_size, embedding_dim, window_size)
+# Build Skip-gram model
+model = build_skipgram_model(vocab_size, embedding_dim)
 
 # Checkpoint to save best model
 checkpoint = ModelCheckpoint(
-    filepath="cbow_best_model.h5",
+    filepath="skipgram_best_model.h5",
     monitor="loss",  # Monitor training loss
     save_best_only=True,
     mode="min",
@@ -217,6 +183,8 @@ early_stopping = EarlyStopping(
 # Training dataset (replace with actual tf.data.Dataset)
 batch_size = 128
 epochs = 50  # More epochs needed for embeddings
+
+# ✅ Skip-gram dataset (already yields (target, context) pairs)
 dataset = dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
 # Train model
@@ -228,11 +196,15 @@ model.fit(
 )
 
 
-#%%
-# =============================================
-# ✅ 9. Extract and Visualize Word Embeddings
-# =============================================
-word_vectors = model.layers[2].get_weights()[0]  # Extract learned embeddings
+#%% 
+# ============================================= 
+# ✅ 9. Extract and Visualize Word Embeddings 
+# ============================================= 
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+
+# Extract learned embeddings
+word_vectors = model.layers[1].get_weights()[0]  # Embedding layer is now at index 1
 
 # Function to visualize embeddings using t-SNE
 def visualize_embeddings(word_vectors, word_to_ix, sample_words=None, num_words=100):
